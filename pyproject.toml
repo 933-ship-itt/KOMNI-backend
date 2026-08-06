@@ -1,2 +1,2 @@
 [tool.vercel]
-entrypoint = "api.verify-key:handler"
+entrypoint = "api.verify_key:handler"
