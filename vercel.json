@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/api/verify-key", "destination": "/api/verify-key.py" }
+  ]
+}
