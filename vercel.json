@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/verify_key",
+      "dest": "/api/verify_key.py",
+      "methods": ["POST", "OPTIONS"]
+    }
+  ]
+}
