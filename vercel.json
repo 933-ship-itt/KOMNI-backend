@@ -1,15 +1,13 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/verify_key.py",
-      "use": "@vercel/python"
-    }
-  ],
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "api/verify_key.py"
+      "src": "/api/verify_key",
+      "dest": "/api/verify_key.py"
+    },
+    {
+      "src": "/api/interceptor",
+      "dest": "/api/interceptor.py"
     }
   ]
 }
