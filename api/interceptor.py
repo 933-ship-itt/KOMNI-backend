@@ -21,16 +21,13 @@ def calculate_p99(latencies):
     p99_index = int(len(sorted_lats) * 0.99)
     return sorted_lats[min(p99_index, len(sorted_lats) - 1)]
 
-# Catch-all decorator handles ANY URL path Vercel passes to this file
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'OPTIONS'])
-def handle_interceptor(path):
+def handle_request(path):
     if request.method == 'OPTIONS':
         return '', 200
 
-    # ------------------------------------------------------------------
-    # POST: Triggered by store.html or curl
-    # ------------------------------------------------------------------
+    # Handle incoming transaction simulation from store.html or curl
     if request.method == 'POST':
         start_time = time.time()
         data = request.get_json(silent=True) or {}
@@ -74,9 +71,7 @@ def handle_interceptor(path):
             "latency_ms": latency_ms
         }), 200
 
-    # ------------------------------------------------------------------
-    # GET: Triggered by dashboard.html
-    # ------------------------------------------------------------------
+    # Handle telemetry fetching from dashboard.html
     p99_latency = calculate_p99(STATE["latencies"])
 
     return jsonify({
