@@ -1,13 +1,6 @@
 {
-  "version": 2,
-  "routes": [
-    {
-      "src": "/api/verify_key",
-      "dest": "/api/verify_key.py"
-    },
-    {
-      "src": "/api/interceptor",
-      "dest": "/api/interceptor.py"
-    }
+  "rewrites": [
+    { "source": "/api/verify_key", "destination": "/api/verify_key.py" },
+    { "source": "/api/interceptor", "destination": "/api/interceptor.py" }
   ]
 }
