@@ -1,6 +1,23 @@
 {
-  "rewrites": [
-    { "source": "/api/verify_key", "destination": "/api/verify_key.py" },
-    { "source": "/api/interceptor", "destination": "/api/interceptor.py" }
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/verify_key.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "api/interceptor.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/verify_key",
+      "dest": "api/verify_key.py"
+    },
+    {
+      "src": "/api/interceptor",
+      "dest": "api/interceptor.py"
+    }
   ]
 }
