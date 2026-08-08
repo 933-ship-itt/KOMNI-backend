@@ -6,7 +6,7 @@ app = Flask(__name__)
 CORS(app)
 
 VALID_ISSUANCE_KEYS = {
-    "ik_test_demo": {
+    "ik_010101": {
         "owner": "KOMNI Sandbox Client",
         "tier": "Development Node",
         "key_type": "Test Environment Key",
