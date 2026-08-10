@@ -13,22 +13,49 @@ app = Flask(__name__)
 CORS(app)
 
 
-# ---------------------------------------------------------
-# Firebase Admin initialization
-# ---------------------------------------------------------
+# =========================================================
+# DEVELOPMENT BOOTSTRAP CONFIG
+# =========================================================
+
+# Development-only issuance key.
+#
+# IMPORTANT:
+# This should NOT be used in production.
+# It exists so the KOMNI development workspace can bootstrap
+# its first Firestore issuance record automatically.
+DEV_ISSUANCE_KEY = "ik_test_demo"
+
+DEV_ISSUANCE_METADATA = {
+    "owner": "KOMNI Sandbox Client",
+    "business_id": "biz_komni_sandbox",
+    "workspace_id": "workspace_komni_sandbox",
+    "tier": "Development Node",
+    "key_type": "Test Environment Key",
+    "status": "active"
+}
+
+
+# =========================================================
+# FIREBASE ADMIN
+# =========================================================
 
 def get_firebase_app():
     """
-    Initialize Firebase Admin exactly once.
+    Initialize Firebase Admin once.
 
-    Vercel should have a FIREBASE_SERVICE_ACCOUNT_JSON
-    environment variable containing the Firebase Admin
-    service-account JSON.
+    Required Vercel environment variable:
+
+        FIREBASE_SERVICE_ACCOUNT_JSON
+
+    This must contain the Firebase Admin service-account JSON.
     """
+
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
-    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    service_account_json = os.environ.get(
+        "FIREBASE_SERVICE_ACCOUNT_JSON"
+    )
 
     if not service_account_json:
         raise RuntimeError(
@@ -48,38 +75,45 @@ def get_firebase_app():
 
 
 def get_db():
-    firebase_app = get_firebase_app()
-    return firestore.client(app=firebase_app)
+    get_firebase_app()
+    return firestore.client()
 
 
-# ---------------------------------------------------------
-# Issuance key helpers
-# ---------------------------------------------------------
+# =========================================================
+# ISSUANCE KEY HELPERS
+# =========================================================
 
 def normalize_issuance_key(raw_key):
     """
-    Normalize the issuance key in the same way your existing
-    endpoint did.
+    Normalize:
 
-    Example:
-        IK-010101
-        ik-010101
-        ik_010101
+        IK-TEST-DEMO
+        ik-test-demo
+        ik_test_demo
 
-    all become:
-        ik_010101
+    into:
+
+        ik_test_demo
     """
+
     if not isinstance(raw_key, str):
         return ""
 
-    return raw_key.strip().lower().replace("ik-", "ik_")
+    return (
+        raw_key
+        .strip()
+        .lower()
+        .replace("ik-", "ik_")
+    )
 
 
 def hash_issuance_key(raw_key):
     """
-    Store only a SHA-256 hash of the issuance key in Firestore.
-    The raw key itself is never stored.
+    Hash the normalized issuance key.
+
+    The plaintext issuance key is never stored in Firestore.
     """
+
     normalized = normalize_issuance_key(raw_key)
 
     return hashlib.sha256(
@@ -87,25 +121,64 @@ def hash_issuance_key(raw_key):
     ).hexdigest()
 
 
-# ---------------------------------------------------------
-# Firestore lookup
-# ---------------------------------------------------------
+# =========================================================
+# DEVELOPMENT FIRESTORE BOOTSTRAP
+# =========================================================
+
+def ensure_dev_issuance_key():
+    """
+    Ensure the development issuance key exists in Firestore.
+
+    This allows:
+
+        ik-test-demo
+
+    to automatically create its Firestore record the first
+    time the endpoint is used.
+
+    This function is intentionally limited to the development
+    key and should not be used as the production provisioning
+    mechanism.
+    """
+
+    db = get_db()
+
+    key_hash = hash_issuance_key(DEV_ISSUANCE_KEY)
+
+    collection = db.collection("issuance_keys")
+
+    query = (
+        collection
+        .where("key_hash", "==", key_hash)
+        .limit(1)
+        .stream()
+    )
+
+    existing = next(query, None)
+
+    if existing:
+        return existing.id, existing.to_dict() or {}
+
+    document_id = "ik_test_demo"
+
+    document_data = {
+        "key_hash": key_hash,
+        **DEV_ISSUANCE_METADATA,
+        "source": "development_bootstrap",
+    }
+
+    collection.document(document_id).set(document_data)
+
+    return document_id, document_data
+
+
+# =========================================================
+# FIRESTORE LOOKUP
+# =========================================================
 
 def find_issuance_key(raw_key):
     """
-    Locate an issuance key by its SHA-256 hash.
-
-    Firestore structure:
-
-    issuance_keys/
-        {document_id}
-            key_hash
-            owner
-            business_id
-            workspace_id
-            tier
-            key_type
-            status
+    Find an issuance key by its SHA-256 hash.
     """
 
     db = get_db()
@@ -120,22 +193,27 @@ def find_issuance_key(raw_key):
     )
 
     for document in query:
-        data = document.to_dict() or {}
-
         return {
             "document_id": document.id,
-            "data": data,
+            "data": document.to_dict() or {}
         }
 
     return None
 
 
-# ---------------------------------------------------------
-# API
-# ---------------------------------------------------------
+# =========================================================
+# VERIFY ISSUANCE KEY
+# =========================================================
 
-@app.route("/", defaults={"path": ""}, methods=["POST", "OPTIONS"])
-@app.route("/<path:path>", methods=["POST", "OPTIONS"])
+@app.route(
+    "/",
+    defaults={"path": ""},
+    methods=["POST", "OPTIONS"]
+)
+@app.route(
+    "/<path:path>",
+    methods=["POST", "OPTIONS"]
+)
 def verify_key(path):
 
     if request.method == "OPTIONS":
@@ -153,7 +231,6 @@ def verify_key(path):
 
     normalized_key = normalize_issuance_key(raw_key)
 
-    # Issuance keys must have the expected format.
     if not normalized_key.startswith("ik_"):
         return jsonify({
             "valid": False,
@@ -161,12 +238,30 @@ def verify_key(path):
         }), 401
 
     try:
+
+        # -------------------------------------------------
+        # Development bootstrap
+        # -------------------------------------------------
+        #
+        # If the user provides the development key,
+        # make sure its Firestore record exists.
+        #
+        if normalized_key == DEV_ISSUANCE_KEY:
+            ensure_dev_issuance_key()
+
+        # -------------------------------------------------
+        # Normal Firestore authorization
+        # -------------------------------------------------
+
         matched = find_issuance_key(normalized_key)
 
         if not matched:
             return jsonify({
                 "valid": False,
-                "reason": "Unrecognized or revoked Enterprise Issuance Key."
+                "reason": (
+                    "Unrecognized or revoked "
+                    "Enterprise Issuance Key."
+                )
             }), 401
 
         metadata = matched["data"]
@@ -178,11 +273,14 @@ def verify_key(path):
         if metadata.get("status") != "active":
             return jsonify({
                 "valid": False,
-                "reason": "Unrecognized or revoked Enterprise Issuance Key."
+                "reason": (
+                    "Unrecognized or revoked "
+                    "Enterprise Issuance Key."
+                )
             }), 401
 
         # -------------------------------------------------
-        # Return only non-sensitive metadata
+        # Only return safe metadata
         # -------------------------------------------------
 
         safe_metadata = {
@@ -201,31 +299,41 @@ def verify_key(path):
         }), 200
 
     except Exception as exc:
-        # Never expose Firebase credentials, database details,
-        # or internal exception information to the browser.
+
+        # Do not expose Firebase credentials,
+        # Firestore internals, or stack traces.
         print(f"verify_key error: {exc}")
 
         return jsonify({
             "valid": False,
-            "reason": "Authorization service temporarily unavailable."
+            "reason": (
+                "Authorization service temporarily unavailable."
+            )
         }), 500
 
 
-# ---------------------------------------------------------
-# Health check
-# ---------------------------------------------------------
+# =========================================================
+# HEALTH CHECK
+# =========================================================
 
 @app.route("/", methods=["GET"])
 def health():
+
     return jsonify({
         "ok": True,
         "endpoint": "/api/verify_key",
         "service": "KOMNI Enterprise Issuance Authorization",
-        "database": "firestore"
+        "database": "firestore",
+        "development_bootstrap": True
     }), 200
 
 
+# =========================================================
+# LOCAL DEVELOPMENT
+# =========================================================
+
 if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
