@@ -14,12 +14,7 @@ def normalize_key(value):
     if not isinstance(value, str):
         return ""
 
-    value = value.strip().lower()
-
-    if value.startswith("ik-"):
-        value = "ik_" + value[3:]
-
-    return value
+    return value.strip().lower().replace("-", "_")
 
 
 @app.route("/", methods=["GET"])
