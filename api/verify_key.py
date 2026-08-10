@@ -14,7 +14,7 @@ CORS(app)
 
 
 # =========================================================
-# DEVELOPMENT CONFIG
+# DEVELOPMENT ISSUANCE KEY
 # =========================================================
 
 DEV_ISSUANCE_KEY = "ik_test_demo"
@@ -30,7 +30,7 @@ DEV_ISSUANCE_METADATA = {
 
 
 # =========================================================
-# FIREBASE
+# FIREBASE ADMIN
 # =========================================================
 
 def get_firebase_app():
@@ -47,13 +47,22 @@ def get_firebase_app():
             "FIREBASE_SERVICE_ACCOUNT_JSON is not configured."
         )
 
-    service_account_info = json.loads(service_account_json)
+    try:
+        service_account_info = json.loads(
+            service_account_json
+        )
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            "FIREBASE_SERVICE_ACCOUNT_JSON is invalid JSON."
+        )
 
     credential = credentials.Certificate(
         service_account_info
     )
 
-    return firebase_admin.initialize_app(credential)
+    return firebase_admin.initialize_app(
+        credential
+    )
 
 
 def get_db():
@@ -62,7 +71,7 @@ def get_db():
 
 
 # =========================================================
-# KEY HELPERS
+# KEY NORMALIZATION
 # =========================================================
 
 def normalize_issuance_key(raw_key):
@@ -72,13 +81,6 @@ def normalize_issuance_key(raw_key):
 
     value = raw_key.strip().lower()
 
-    # Accept all of these:
-    #
-    # ik-test-demo
-    # ik_test_demo
-    # IK-TEST-DEMO
-    # IK_TEST_DEMO
-
     if value.startswith("ik-"):
         value = "ik_" + value[3:]
 
@@ -87,7 +89,9 @@ def normalize_issuance_key(raw_key):
 
 def hash_issuance_key(raw_key):
 
-    normalized = normalize_issuance_key(raw_key)
+    normalized = normalize_issuance_key(
+        raw_key
+    )
 
     return hashlib.sha256(
         normalized.encode("utf-8")
@@ -95,44 +99,86 @@ def hash_issuance_key(raw_key):
 
 
 # =========================================================
-# DEVELOPMENT BOOTSTRAP
+# DEVELOPMENT KEY BOOTSTRAP
 # =========================================================
 
 def ensure_dev_key():
 
     db = get_db()
 
-    key_hash = hash_issuance_key(
-        DEV_ISSUANCE_KEY
-    )
-
     document_ref = (
         db.collection("issuance_keys")
         .document("ik_test_demo")
     )
 
+    key_hash = hash_issuance_key(
+        DEV_ISSUANCE_KEY
+    )
+
     document = document_ref.get()
+
+    expected_data = {
+        "key_hash": key_hash,
+        **DEV_ISSUANCE_METADATA,
+        "source": "development_bootstrap",
+    }
 
     if not document.exists:
 
-        document_ref.set({
-            "key_hash": key_hash,
-            **DEV_ISSUANCE_METADATA,
-            "source": "development_bootstrap",
-        })
+        document_ref.set(
+            expected_data
+        )
 
-    return document_ref.get().to_dict()
+        print(
+            "Created development issuance key."
+        )
+
+        return expected_data
+
+    existing = document.to_dict() or {}
+
+    # Keep the development record synchronized.
+    #
+    # This also fixes an incorrectly-created test document
+    # instead of leaving us with a stale hash.
+
+    if (
+        existing.get("key_hash") != key_hash
+        or existing.get("status") != "active"
+    ):
+
+        document_ref.set(
+            expected_data,
+            merge=True
+        )
+
+        print(
+            "Repaired development issuance key."
+        )
+
+        return {
+            **existing,
+            **expected_data,
+        }
+
+    return existing
 
 
 # =========================================================
-# LOOKUP
+# NORMAL FIRESTORE LOOKUP
 # =========================================================
 
 def find_issuance_key(raw_key):
 
     db = get_db()
 
-    key_hash = hash_issuance_key(raw_key)
+    key_hash = hash_issuance_key(
+        raw_key
+    )
+
+    print(
+        f"Looking up issuance key hash: {key_hash}"
+    )
 
     results = (
         db.collection("issuance_keys")
@@ -147,13 +193,15 @@ def find_issuance_key(raw_key):
 
     for document in results:
 
-        return document.to_dict()
+        metadata = document.to_dict() or {}
+
+        return metadata
 
     return None
 
 
 # =========================================================
-# VERIFY
+# VERIFY ENDPOINT
 # =========================================================
 
 @app.route(
@@ -170,11 +218,17 @@ def verify_key(path):
     if request.method == "OPTIONS":
         return "", 200
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
-    raw_key = data.get("key", "")
+    raw_key = data.get(
+        "key",
+        ""
+    )
 
     if not isinstance(raw_key, str):
+
         return jsonify({
             "valid": False,
             "reason": "Missing required field: key"
@@ -183,6 +237,7 @@ def verify_key(path):
     raw_key = raw_key.strip()
 
     if not raw_key:
+
         return jsonify({
             "valid": False,
             "reason": "Missing required field: key"
@@ -193,38 +248,59 @@ def verify_key(path):
     )
 
     print(
-        f"VERIFY KEY: raw={raw_key!r}, "
-        f"normalized={normalized_key!r}"
+        f"Received issuance key: {normalized_key}"
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # DEVELOPMENT KEY
-    # -----------------------------------------------------
+    # =====================================================
 
     if normalized_key == DEV_ISSUANCE_KEY:
 
         try:
 
-            # This creates the Firestore record if necessary.
             metadata = ensure_dev_key()
+
+            if metadata.get("status") != "active":
+
+                return jsonify({
+                    "valid": False,
+                    "reason": "Development issuance key is revoked."
+                }), 401
 
             return jsonify({
                 "valid": True,
                 "message": "Development issuance key verified.",
                 "metadata": {
-                    "owner": metadata.get("owner"),
-                    "business_id": metadata.get("business_id"),
-                    "workspace_id": metadata.get("workspace_id"),
-                    "tier": metadata.get("tier"),
-                    "key_type": metadata.get("key_type"),
-                    "status": metadata.get("status"),
+                    "owner": metadata.get(
+                        "owner",
+                        ""
+                    ),
+                    "business_id": metadata.get(
+                        "business_id",
+                        ""
+                    ),
+                    "workspace_id": metadata.get(
+                        "workspace_id",
+                        ""
+                    ),
+                    "tier": metadata.get(
+                        "tier",
+                        ""
+                    ),
+                    "key_type": metadata.get(
+                        "key_type",
+                        ""
+                    ),
+                    "status": "active",
                 }
             }), 200
 
         except Exception as exc:
 
             print(
-                f"Development key bootstrap error: {exc}"
+                "Development key error:",
+                repr(exc)
             )
 
             return jsonify({
@@ -232,9 +308,9 @@ def verify_key(path):
                 "reason": "Authorization service temporarily unavailable."
             }), 500
 
-    # -----------------------------------------------------
+    # =====================================================
     # NORMAL ISSUANCE KEYS
-    # -----------------------------------------------------
+    # =====================================================
 
     if not normalized_key.startswith("ik_"):
 
@@ -267,11 +343,26 @@ def verify_key(path):
             "valid": True,
             "message": "Signature verified successfully.",
             "metadata": {
-                "owner": metadata.get("owner", ""),
-                "business_id": metadata.get("business_id", ""),
-                "workspace_id": metadata.get("workspace_id", ""),
-                "tier": metadata.get("tier", ""),
-                "key_type": metadata.get("key_type", ""),
+                "owner": metadata.get(
+                    "owner",
+                    ""
+                ),
+                "business_id": metadata.get(
+                    "business_id",
+                    ""
+                ),
+                "workspace_id": metadata.get(
+                    "workspace_id",
+                    ""
+                ),
+                "tier": metadata.get(
+                    "tier",
+                    ""
+                ),
+                "key_type": metadata.get(
+                    "key_type",
+                    ""
+                ),
                 "status": "active",
             }
         }), 200
@@ -279,7 +370,8 @@ def verify_key(path):
     except Exception as exc:
 
         print(
-            f"verify_key Firestore error: {exc}"
+            "Firestore lookup error:",
+            repr(exc)
         )
 
         return jsonify({
@@ -289,10 +381,13 @@ def verify_key(path):
 
 
 # =========================================================
-# HEALTH
+# HEALTH CHECK
 # =========================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def health():
 
     return jsonify({
@@ -304,10 +399,19 @@ def health():
     }), 200
 
 
+# =========================================================
+# LOCAL DEVELOPMENT
+# =========================================================
+
 if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
+        port=int(
+            os.environ.get(
+                "PORT",
+                8000
+            )
+        ),
         debug=True
     )
