@@ -8,6 +8,10 @@
     {
       "src": "api/interceptor.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/create_key.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -18,6 +22,10 @@
     {
       "src": "/api/interceptor",
       "dest": "api/interceptor.py"
+    },
+    {
+      "src": "/api/create_key",
+      "dest": "api/create_key.py"
     }
   ]
 }
