@@ -19,6 +19,8 @@ CORS(app)
 
 DEV_ISSUANCE_KEY = "ik_test_demo"
 
+DEPLOYMENT_MARKER = "VERIFY_KEY_FIRESTORE_V3"
+
 DEV_ISSUANCE_METADATA = {
     "owner": "KOMNI Sandbox Client",
     "business_id": "biz_komni_sandbox",
@@ -391,12 +393,13 @@ def verify_key(path):
 def health():
 
     return jsonify({
-        "ok": True,
-        "endpoint": "/api/verify_key",
-        "service": "KOMNI Enterprise Issuance Authorization",
-        "database": "firestore",
-        "development_key_enabled": True,
-    }), 200
+    "ok": True,
+    "endpoint": "/api/verify_key",
+    "service": "KOMNI Enterprise Issuance Authorization",
+    "database": "firestore",
+    "development_key_enabled": True,
+    "deployment_marker": DEPLOYMENT_MARKER
+}), 200
 
 
 # =========================================================
