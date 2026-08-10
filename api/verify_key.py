@@ -1,7 +1,6 @@
 import os
 import json
 import hashlib
-import secrets
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify
@@ -17,13 +16,6 @@ from firebase_admin import credentials, firestore
 
 app = Flask(__name__)
 
-# For production, set CORS_ORIGINS in Vercel to your actual
-# frontend origin(s), comma-separated.
-#
-# Example:
-# CORS_ORIGINS=https://komni.com,https://www.komni.com
-#
-# During development, "*" is allowed as a fallback.
 cors_origins = os.environ.get("CORS_ORIGINS", "*")
 
 if cors_origins == "*":
@@ -46,33 +38,20 @@ else:
 # ============================================================
 
 ISSUANCE_COLLECTION = "issuance_keys"
+AUTH_EVENT_COLLECTION = "issuance_auth_events"
 
-# Development bootstrap is OFF unless explicitly enabled.
-#
-# In Vercel, for your development environment:
-#
-# ENABLE_DEV_BOOTSTRAP=true
-#
-# Do NOT enable this in a real production environment.
-ENABLE_DEV_BOOTSTRAP = (
-    os.environ.get(
-        "ENABLE_DEV_BOOTSTRAP",
-        "false"
-    ).strip().lower()
-    == "true"
-)
-
-DEV_ISSUANCE_KEY = os.environ.get(
-    "DEV_ISSUANCE_KEY",
-    "ik_test_demo"
-)
-
-DEV_ISSUANCE_METADATA = {
-    "owner": "KOMNI Sandbox Client",
-    "business_id": "biz_komni_sandbox",
-    "workspace_id": "workspace_komni_sandbox",
-    "tier": "Development Node",
-    "key_type": "Test Environment Key",
+# IMPORTANT:
+# This is intentionally server-side. It is never sent to login.html.
+# Add future issuance keys here as they are issued.
+ISSUANCE_KEYS = {
+    "ik-010101": {
+        "owner": "KOMNI Sandbox Client",
+        "business_id": "biz_komni_sandbox",
+        "workspace_id": "workspace_komni_sandbox",
+        "tier": "Development Node",
+        "key_type": "Test Environment Key",
+        "environment": "test",
+    }
 }
 
 
@@ -82,23 +61,21 @@ DEV_ISSUANCE_METADATA = {
 
 def get_firebase_app():
     """
-    Initialize Firebase Admin exactly once per serverless
-    execution environment.
+    Initialize Firebase Admin once per warm Vercel execution.
 
     Required Vercel environment variable:
 
         FIREBASE_SERVICE_ACCOUNT_JSON
 
-    The value must contain the Firebase Admin service-account
-    JSON object.
+    It must contain the Firebase Admin service-account JSON object.
+    The private service-account JSON stays server-side and is never
+    exposed to the browser.
     """
 
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
-    raw_credentials = os.environ.get(
-        "FIREBASE_SERVICE_ACCOUNT_JSON"
-    )
+    raw_credentials = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
 
     if not raw_credentials:
         raise RuntimeError(
@@ -106,22 +83,16 @@ def get_firebase_app():
         )
 
     try:
-        service_account_info = json.loads(
-            raw_credentials
-        )
+        service_account_info = json.loads(raw_credentials)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
             "FIREBASE_SERVICE_ACCOUNT_JSON contains invalid JSON."
         ) from exc
 
     try:
-        credential = credentials.Certificate(
-            service_account_info
-        )
+        credential = credentials.Certificate(service_account_info)
 
-        return firebase_admin.initialize_app(
-            credential
-        )
+        return firebase_admin.initialize_app(credential)
 
     except Exception as exc:
         raise RuntimeError(
@@ -130,32 +101,25 @@ def get_firebase_app():
 
 
 def get_db():
-    """
-    Return the Firestore client.
-    """
-
     get_firebase_app()
-
     return firestore.client()
 
 
 # ============================================================
-# ISSUANCE KEY NORMALIZATION
+# ISSUANCE KEY NORMALIZATION / HASHING
 # ============================================================
 
 def normalize_issuance_key(raw_key):
     """
-    Convert accepted presentation forms to one canonical form.
+    Canonical representation.
 
-    Examples:
-
-        IK-TEST-DEMO
-        ik-test-demo
-        ik_test_demo
+    ik-010101
+    IK-010101
+    ik_010101
 
     all become:
 
-        ik_test_demo
+    ik_010101
     """
 
     if not isinstance(raw_key, str):
@@ -169,20 +133,8 @@ def normalize_issuance_key(raw_key):
     )
 
 
-# ============================================================
-# KEY HASHING
-# ============================================================
-
 def hash_issuance_key(raw_key):
-    """
-    Hash the canonical issuance key.
-
-    Plaintext issuance keys are never written to Firestore.
-    """
-
-    normalized = normalize_issuance_key(
-        raw_key
-    )
+    normalized = normalize_issuance_key(raw_key)
 
     if not normalized:
         return ""
@@ -192,232 +144,130 @@ def hash_issuance_key(raw_key):
     ).hexdigest()
 
 
-# ============================================================
-# SAFE ERROR RESPONSE
-# ============================================================
-
-def authorization_failure(
-    reason="Unrecognized or revoked Enterprise Issuance Key."
-):
+def find_server_key(raw_key):
     """
-    Keep authorization failures intentionally generic.
-
-    We do not tell a caller whether:
-      - the key exists,
-      - the key is revoked,
-      - the key belongs to another workspace,
-      - Firestore contains a matching hash.
-
-    This prevents authorization enumeration.
+    Compare the submitted key against the server-side issuance
+    registry. The plaintext key is never returned to the client.
     """
 
+    normalized = normalize_issuance_key(raw_key)
+
+    for configured_key, metadata in ISSUANCE_KEYS.items():
+        if normalize_issuance_key(configured_key) == normalized:
+            return configured_key, metadata
+
+    return None, None
+
+
+# ============================================================
+# FIRESTORE REGISTRY
+# ============================================================
+
+def save_issuance_registry(key, metadata):
+    """
+    Upsert the verified issuance key's server-side registry record.
+
+    Firestore stores the SHA-256 key hash rather than the plaintext
+    issuance key.
+    """
+
+    db = get_db()
+
+    normalized = normalize_issuance_key(key)
+    key_hash = hash_issuance_key(normalized)
+
+    if not key_hash:
+        raise RuntimeError("Unable to hash issuance key.")
+
+    # Stable document ID derived from the canonical key.
+    document_id = key_hash[:32]
+
+    document_ref = (
+        db.collection(ISSUANCE_COLLECTION)
+        .document(document_id)
+    )
+
+    now = firestore.SERVER_TIMESTAMP
+
+    document_ref.set(
+        {
+            "key_hash": key_hash,
+            "owner": metadata["owner"],
+            "business_id": metadata["business_id"],
+            "workspace_id": metadata["workspace_id"],
+            "tier": metadata["tier"],
+            "key_type": metadata["key_type"],
+            "environment": metadata["environment"],
+            "status": "active",
+            "source": "server_hardcoded_registry",
+            "updated_at": now,
+        },
+        merge=True,
+    )
+
+    return document_id
+
+
+def save_auth_event(key, metadata, issuance_document_id):
+    """
+    Save an audit event for the successful login.
+
+    The raw issuance key is intentionally not stored.
+    """
+
+    db = get_db()
+
+    key_hash = hash_issuance_key(key)
+
+    event_ref = db.collection(AUTH_EVENT_COLLECTION).document()
+
+    event_ref.set(
+        {
+            "issuance_key_hash": key_hash,
+            "issuance_key_id": issuance_document_id,
+            "owner": metadata["owner"],
+            "business_id": metadata["business_id"],
+            "workspace_id": metadata["workspace_id"],
+            "environment": metadata["environment"],
+            "event": "issuance_key_verified",
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+
+    return event_ref.id
+
+
+# ============================================================
+# SAFE RESPONSES
+# ============================================================
+
+def authorization_failure():
     return jsonify({
         "valid": False,
-        "reason": reason
+        "reason": "Unrecognized or revoked Enterprise Issuance Key."
     }), 401
 
 
-# ============================================================
-# FIRESTORE DEVELOPMENT BOOTSTRAP
-# ============================================================
-
-def ensure_development_issuance_key():
+def build_safe_metadata(document_id, metadata):
     """
-    Development-only helper.
+    Safe data that login.html can receive.
 
-    When ENABLE_DEV_BOOTSTRAP=true, the development issuance
-    key is created in Firestore if it does not already exist.
-
-    This is deliberately disabled by default.
-    """
-
-    if not ENABLE_DEV_BOOTSTRAP:
-        return None
-
-    normalized_key = normalize_issuance_key(
-        DEV_ISSUANCE_KEY
-    )
-
-    key_hash = hash_issuance_key(
-        normalized_key
-    )
-
-    if not key_hash:
-        raise RuntimeError(
-            "Development issuance key is invalid."
-        )
-
-    db = get_db()
-
-    collection = db.collection(
-        ISSUANCE_COLLECTION
-    )
-
-    # Use a deterministic document ID for the development
-    # bootstrap record.
-    document_ref = collection.document(
-        "ik_test_demo"
-    )
-
-    snapshot = document_ref.get()
-
-    if snapshot.exists:
-        return {
-            "document_id": document_ref.id,
-            "data": snapshot.to_dict() or {}
-        }
-
-    document_data = {
-        "key_hash": key_hash,
-
-        "owner":
-            DEV_ISSUANCE_METADATA["owner"],
-
-        "business_id":
-            DEV_ISSUANCE_METADATA["business_id"],
-
-        "workspace_id":
-            DEV_ISSUANCE_METADATA["workspace_id"],
-
-        "tier":
-            DEV_ISSUANCE_METADATA["tier"],
-
-        "key_type":
-            DEV_ISSUANCE_METADATA["key_type"],
-
-        "status":
-            "active",
-
-        "environment":
-            "test",
-
-        "source":
-            "development_bootstrap",
-
-        "created_at":
-            firestore.SERVER_TIMESTAMP,
-
-        "updated_at":
-            firestore.SERVER_TIMESTAMP,
-    }
-
-    document_ref.set(
-        document_data
-    )
-
-    return {
-        "document_id": document_ref.id,
-        "data": document_data
-    }
-
-
-# ============================================================
-# FIRESTORE KEY LOOKUP
-# ============================================================
-
-def find_issuance_key(raw_key):
-    """
-    Find an issuance key by its SHA-256 hash.
-
-    Firestore stores only the hash, never the plaintext key.
-    """
-
-    key_hash = hash_issuance_key(
-        raw_key
-    )
-
-    if not key_hash:
-        return None
-
-    db = get_db()
-
-    query = (
-        db.collection(
-            ISSUANCE_COLLECTION
-        )
-        .where(
-            "key_hash",
-            "==",
-            key_hash
-        )
-        .limit(1)
-        .stream()
-    )
-
-    for document in query:
-
-        return {
-            "document_id":
-                document.id,
-
-            "data":
-                document.to_dict() or {}
-        }
-
-    return None
-
-
-# ============================================================
-# SAFE METADATA
-# ============================================================
-
-def build_safe_metadata(
-    document_id,
-    metadata
-):
-    """
-    Only return fields that login.html needs or that are
-    safe for a browser session to know.
-
-    Never return:
-        key_hash
-        service-account data
-        Stripe secret keys
-        internal credentials
+    Never expose:
+      - raw issuance key
+      - key hash
+      - Firebase service account
+      - private credentials
     """
 
     return {
-        "issuance_key_id":
-            document_id,
-
-        "owner":
-            metadata.get(
-                "owner",
-                ""
-            ),
-
-        "business_id":
-            metadata.get(
-                "business_id",
-                ""
-            ),
-
-        "workspace_id":
-            metadata.get(
-                "workspace_id",
-                ""
-            ),
-
-        "tier":
-            metadata.get(
-                "tier",
-                ""
-            ),
-
-        "key_type":
-            metadata.get(
-                "key_type",
-                ""
-            ),
-
-        "environment":
-            metadata.get(
-                "environment",
-                "test"
-            ),
-
-        "status":
-            "active",
+        "issuance_key_id": document_id,
+        "owner": metadata.get("owner", ""),
+        "business_id": metadata.get("business_id", ""),
+        "workspace_id": metadata.get("workspace_id", ""),
+        "tier": metadata.get("tier", ""),
+        "key_type": metadata.get("key_type", ""),
+        "environment": metadata.get("environment", "test"),
+        "status": "active",
     }
 
 
@@ -425,218 +275,93 @@ def build_safe_metadata(
 # VERIFY ISSUANCE KEY
 # ============================================================
 
-@app.route(
-    "/",
-    methods=[
-        "POST",
-        "OPTIONS"
-    ]
-)
-@app.route(
-    "/api/verify_key",
-    methods=[
-        "POST",
-        "OPTIONS"
-    ]
-)
+@app.route("/", methods=["POST", "OPTIONS"])
+@app.route("/api/verify_key", methods=["POST", "OPTIONS"])
 def verify_key():
-
-    # --------------------------------------------------------
-    # CORS PREFLIGHT
-    # --------------------------------------------------------
 
     if request.method == "OPTIONS":
         return "", 204
 
-    # --------------------------------------------------------
-    # REQUEST BODY
-    # --------------------------------------------------------
-
-    data = request.get_json(
-        silent=True
-    )
+    data = request.get_json(silent=True)
 
     if not isinstance(data, dict):
-
         return jsonify({
             "valid": False,
-            "reason": (
-                "Request body must be a "
-                "JSON object."
-            )
+            "reason": "Request body must be a JSON object."
         }), 400
 
-    raw_key = data.get(
-        "key"
-    )
+    raw_key = data.get("key")
 
-    if not isinstance(
-        raw_key,
-        str
-    ):
-
+    if not isinstance(raw_key, str):
         return jsonify({
             "valid": False,
-            "reason": (
-                "Missing required field: key"
-            )
+            "reason": "Missing required field: key"
         }), 400
 
     raw_key = raw_key.strip()
 
     if not raw_key:
-
         return jsonify({
             "valid": False,
-            "reason": (
-                "Missing required field: key"
-            )
+            "reason": "Missing required field: key"
         }), 400
 
-    # Reasonable maximum prevents someone from sending
-    # extremely large payloads into the hashing path.
     if len(raw_key) > 512:
+        return authorization_failure()
 
+    normalized_key = normalize_issuance_key(raw_key)
+
+    if not normalized_key.startswith("ik_"):
         return authorization_failure()
 
     # --------------------------------------------------------
-    # CANONICAL FORM
+    # SERVER-SIDE ISSUANCE REGISTRY CHECK
     # --------------------------------------------------------
 
-    normalized_key = normalize_issuance_key(
-        raw_key
-    )
+    configured_key, metadata = find_server_key(raw_key)
 
-    if not normalized_key.startswith(
-        "ik_"
-    ):
-
+    if not configured_key or not metadata:
         return authorization_failure()
 
+    if metadata.get("environment") not in ("test", "production"):
+        print("[verify_key] invalid environment for configured key")
+        return jsonify({
+            "valid": False,
+            "reason": "Authorization service temporarily unavailable."
+        }), 503
+
+    if not metadata.get("business_id") or not metadata.get("workspace_id"):
+        print("[verify_key] incomplete server issuance metadata")
+        return jsonify({
+            "valid": False,
+            "reason": "Authorization service temporarily unavailable."
+        }), 503
+
     # --------------------------------------------------------
-    # DEVELOPMENT BOOTSTRAP
+    # FIRESTORE WRITE
     # --------------------------------------------------------
 
     try:
+        issuance_document_id = save_issuance_registry(
+            configured_key,
+            metadata,
+        )
 
-        if (
-            ENABLE_DEV_BOOTSTRAP
-            and normalized_key
-            == normalize_issuance_key(
-                DEV_ISSUANCE_KEY
-            )
-        ):
-
-            ensure_development_issuance_key()
-
-        # ----------------------------------------------------
-        # FIRESTORE LOOKUP
-        # ----------------------------------------------------
-
-        matched = find_issuance_key(
-            normalized_key
+        auth_event_id = save_auth_event(
+            configured_key,
+            metadata,
+            issuance_document_id,
         )
 
     except Exception as exc:
-
-        # Log server-side only.
-        #
-        # Never expose the Firebase exception to the browser.
         print(
-            "[verify_key] authorization lookup error:",
+            "[verify_key] Firestore authorization write error:",
             repr(exc)
         )
 
         return jsonify({
             "valid": False,
-            "reason": (
-                "Authorization service temporarily "
-                "unavailable."
-            )
-        }), 503
-
-    # --------------------------------------------------------
-    # UNKNOWN KEY
-    # --------------------------------------------------------
-
-    if not matched:
-
-        return authorization_failure()
-
-    document_id = matched[
-        "document_id"
-    ]
-
-    metadata = matched[
-        "data"
-    ]
-
-    # --------------------------------------------------------
-    # STATUS CHECK
-    # --------------------------------------------------------
-
-    if metadata.get(
-        "status"
-    ) != "active":
-
-        return authorization_failure()
-
-    # --------------------------------------------------------
-    # REQUIRED OWNERSHIP CONTEXT
-    # --------------------------------------------------------
-
-    business_id = metadata.get(
-        "business_id"
-    )
-
-    workspace_id = metadata.get(
-        "workspace_id"
-    )
-
-    owner = metadata.get(
-        "owner"
-    )
-
-    if not business_id or not workspace_id:
-
-        # A malformed authorization record should never be
-        # accepted simply because its key hash matches.
-        print(
-            "[verify_key] malformed issuance record:",
-            document_id
-        )
-
-        return jsonify({
-            "valid": False,
-            "reason": (
-                "Authorization record is incomplete."
-            )
-        }), 503
-
-    # --------------------------------------------------------
-    # OPTIONAL SECURITY CHECK
-    # --------------------------------------------------------
-
-    environment = metadata.get(
-        "environment",
-        "test"
-    )
-
-    if environment not in (
-        "test",
-        "production"
-    ):
-
-        print(
-            "[verify_key] invalid environment:",
-            document_id
-        )
-
-        return jsonify({
-            "valid": False,
-            "reason": (
-                "Authorization record is invalid."
-            )
+            "reason": "Authorization service temporarily unavailable."
         }), 503
 
     # --------------------------------------------------------
@@ -644,21 +369,20 @@ def verify_key():
     # --------------------------------------------------------
 
     safe_metadata = build_safe_metadata(
-        document_id,
-        metadata
+        issuance_document_id,
+        metadata,
     )
 
     return jsonify({
-
-        "valid":
-            True,
-
-        "message":
-            "Signature verified successfully.",
-
-        "metadata":
-            safe_metadata
-
+        "valid": True,
+        "message": "Issuance key verified and session recorded.",
+        "metadata": safe_metadata,
+        "firestore": {
+            "saved": True,
+            "issuance_record": True,
+            "auth_event": True,
+            "auth_event_id": auth_event_id,
+        },
     }), 200
 
 
@@ -666,26 +390,16 @@ def verify_key():
 # HEALTH CHECK
 # ============================================================
 
-@app.route(
-    "/",
-    methods=["GET"]
-)
-@app.route(
-    "/api/verify_key",
-    methods=["GET"]
-)
+@app.route("/", methods=["GET"])
+@app.route("/api/verify_key", methods=["GET"])
 def health():
 
     return jsonify({
         "ok": True,
-        "service": (
-            "KOMNI Enterprise "
-            "Issuance Authorization"
-        ),
+        "service": "KOMNI Enterprise Issuance Authorization",
         "endpoint": "/api/verify_key",
         "database": "firestore",
-        "development_bootstrap":
-            ENABLE_DEV_BOOTSTRAP
+        "configured_issuance_keys": len(ISSUANCE_KEYS),
     }), 200
 
 
@@ -694,14 +408,8 @@ def health():
 # ============================================================
 
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                8000
-            )
-        ),
-        debug=False
+        port=int(os.environ.get("PORT", 8000)),
+        debug=False,
     )
