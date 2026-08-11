@@ -1,3 +1,5 @@
 fastapi
 firebase-admin
-pydantic[email]
+passlib[bcrypt]
+bcrypt
+pydantic
