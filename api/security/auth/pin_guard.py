@@ -1,3 +1,6 @@
+d.py
+
+
 import os
 import json
 import base64
@@ -15,51 +18,90 @@ app = Flask(__name__)
 app.url_map.strict_slashes = False
 
 def init_firebase():
-    """Initializes the Firebase Admin SDK using the Vercel Environment Variable."""
-    if not firebase_admin._apps:
-        sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
-        if sa_json:
-            try:
-                cert_dict = json.loads(sa_json)
-                cred = credentials.Certificate(cert_dict)
-                firebase_admin.initialize_app(cred)
-            except Exception as e:
-                print(f"Error initializing Firebase: {e}")
+    """Initialize Firebase Admin once per serverless worker.
 
-# Call init once when the Vercel serverless environment boots up
+    Vercel should provide FIREBASE_SERVICE_ACCOUNT_KEY as the complete service
+    account JSON. Base64-encoded JSON is also accepted for environments that
+    make multiline secrets awkward.
+    """
+    if firebase_admin._apps:
+        return True
+
+    raw = (os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY") or "").strip()
+    if not raw:
+        print("FIREBASE_CONFIG_ERROR: FIREBASE_SERVICE_ACCOUNT_KEY is not set")
+        return False
+
+    try:
+        try:
+            cert_dict = json.loads(raw)
+        except json.JSONDecodeError:
+            cert_dict = json.loads(base64.b64decode(raw).decode("utf-8"))
+
+        if not isinstance(cert_dict, dict) or not cert_dict.get("project_id"):
+            raise ValueError("service account JSON is missing project_id")
+
+        cred = credentials.Certificate(cert_dict)
+        firebase_admin.initialize_app(cred)
+        print("FIREBASE_ADMIN_READY")
+        return True
+    except Exception as exc:
+        print(f"FIREBASE_CONFIG_ERROR: {type(exc).__name__}: {exc}")
+        return False
+
+
 init_firebase()
+
+
+def allowed_origins():
+    configured = os.environ.get("FRONTEND_ORIGINS", "https://komni.vercel.app")
+    return {origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()}
+
 
 @app.before_request
 def log_request_info():
-    """Logs incoming paths for debugging Vercel routing."""
     print(f"DEBUG_PATH: {request.path} | METHOD: {request.method}")
     if request.method == "OPTIONS":
-        return jsonify({}), 200
+        return jsonify({"ok": True}), 200
+
 
 @app.after_request
 def add_cors_headers(response):
-    """Secures CORS explicitly to the required frontend."""
-    response.headers['Access-Control-Allow-Origin'] = 'https://komni.vercel.app'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if origin and origin in allowed_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Max-Age"] = "600"
     return response
 
-def require_firebase_user(req):
-    """Validates the Authorization Bearer header securely on the server-side."""
-    if not firebase_admin._apps:
-        return None, (jsonify({"ok": False, "message": "Firebase configuration unavailable."}), 503)
 
-    auth_header = req.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
+@app.route("/health", methods=["GET"])
+def health():
+    ready = bool(firebase_admin._apps)
+    return jsonify({"ok": ready, "firebase": "ready" if ready else "unavailable"}), 200 if ready else 503
+
+
+def require_firebase_user(req):
+    """Verify a Firebase ID token and return its decoded claims."""
+    if not firebase_admin._apps:
+        return None, (jsonify({"ok": False, "code": "FIREBASE_NOT_CONFIGURED", "message": "Firebase Admin is not configured on the backend."}), 503)
+
+    auth_header = (req.headers.get("Authorization") or "").strip()
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
         return None, (jsonify({"ok": False, "message": "Missing or malformed Authorization header."}), 401)
-    
-    token = auth_header.split(" ")[1]
+
     try:
-        decoded_token = auth.verify_id_token(token)
+        decoded_token = auth.verify_id_token(token.strip(), check_revoked=True)
         return decoded_token, None
-    except Exception as e:
-        print(f"Firebase auth error: {e}")
-        return None, (jsonify({"ok": False, "message": "Invalid, expired, or revoked token."}), 401)
+    except auth.RevokedIdTokenError:
+        return None, (jsonify({"ok": False, "message": "Session token has been revoked. Sign in again."}), 401)
+    except Exception as exc:
+        print(f"Firebase auth error: {type(exc).__name__}: {exc}")
+        return None, (jsonify({"ok": False, "message": "Invalid or expired authentication token."}), 401)
+
 
 def hash_pin(pin: str, salt: bytes) -> str:
     derived = hashlib.scrypt(pin.encode('utf-8'), salt=salt, n=16384, r=8, p=1, dklen=32)
