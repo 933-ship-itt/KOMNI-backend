@@ -1,31 +1,14 @@
 {
-  "version": 2,
   "builds": [
     {
-      "src": "api/verify_key.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "api/interceptor.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "api/create_key.py",
+      "src": "api/security/auth/pin_guard.py",
       "use": "@vercel/python"
     }
   ],
-  "routes": [
+  "rewrites": [
     {
-      "src": "/api/verify_key",
-      "dest": "/api/verify_key.py"
-    },
-    {
-      "src": "/api/interceptor",
-      "dest": "/api/interceptor.py"
-    },
-    {
-      "src": "/api/create_key",
-      "dest": "/api/create_key.py"
+      "source": "/api/security/auth/pin_guard/:match*",
+      "destination": "/api/security/auth/pin_guard.py"
     }
   ]
 }
