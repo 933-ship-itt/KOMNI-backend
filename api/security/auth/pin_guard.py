@@ -1,6 +1,7 @@
 # /api/security/auth/pin_guard.py
 
 import os
+import json
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import firebase_admin
-from firebase_admin import auth, firestore
+from firebase_admin import credentials, auth, firestore
 from passlib.context import CryptContext
 
 # ---------------------------------------------------------
@@ -19,9 +20,17 @@ from passlib.context import CryptContext
 app = FastAPI(title="KOMNI PIN Guard")
 security = HTTPBearer()
 
-# Initialize Firebase Admin (assumes GOOGLE_APPLICATION_CREDENTIALS is set)
+# Initialize Firebase Admin for Vercel Serverless Environment
 if not firebase_admin._apps:
-    firebase_admin.initialize_app()
+    service_account_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
+    if service_account_env:
+        # Load credentials securely from Vercel environment variable
+        cred_dict = json.loads(service_account_env)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+    else:
+        # Fallback for local development (uses Application Default Credentials)
+        firebase_admin.initialize_app()
 
 db = firestore.client()
 
