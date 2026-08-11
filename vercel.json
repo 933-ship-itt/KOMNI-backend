@@ -1,9 +1,14 @@
 {
-  "version": 2,
   "builds": [
-    { "src": "pin_guard.py", "use": "@vercel/python" }
+    {
+      "src": "api/security/auth/pin_guard.py",
+      "use": "@vercel/python"
+    }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "pin_guard.py" }
+    {
+      "src": "/api/security/auth/pin_guard/(.*)",
+      "dest": "api/security/auth/pin_guard.py"
+    }
   ]
 }
