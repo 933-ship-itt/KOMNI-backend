@@ -1,15 +1,9 @@
 {
   "version": 2,
   "builds": [
-    {
-      "src": "d.py",
-      "use": "@vercel/python"
-    }
+    { "src": "pin_guard.py", "use": "@vercel/python" }
   ],
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/d.py"
-    }
+  "routes": [
+    { "src": "/(.*)", "dest": "pin_guard.py" }
   ]
 }
