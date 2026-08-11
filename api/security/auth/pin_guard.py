@@ -10,13 +10,14 @@ from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
-# Initialize Flask App
+# Initialize Flask App & disable strict trailing slashes to prevent 404s
 app = Flask(__name__)
+app.url_map.strict_slashes = False
 
 def init_firebase():
     """Initializes the Firebase Admin SDK using the Vercel Environment Variable."""
     if not firebase_admin._apps:
-        sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+        sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
         if sa_json:
             try:
                 cert_dict = json.loads(sa_json)
@@ -28,11 +29,23 @@ def init_firebase():
 # Call init once when the Vercel serverless environment boots up
 init_firebase()
 
+@app.before_request
+def log_request_info():
+    """Logs incoming paths for debugging Vercel routing."""
+    print(f"DEBUG_PATH: {request.path} | METHOD: {request.method}")
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+@app.after_request
+def add_cors_headers(response):
+    """Secures CORS explicitly to the required frontend."""
+    response.headers['Access-Control-Allow-Origin'] = 'https://komni.vercel.app'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
 def require_firebase_user(req):
-    """
-    Validates the Authorization Bearer header securely on the server-side.
-    Returns (decoded_token, None) on success, or (None, error_response) on failure.
-    """
+    """Validates the Authorization Bearer header securely on the server-side."""
     if not firebase_admin._apps:
         return None, (jsonify({"ok": False, "message": "Firebase configuration unavailable."}), 503)
 
@@ -49,50 +62,23 @@ def require_firebase_user(req):
         return None, (jsonify({"ok": False, "message": "Invalid, expired, or revoked token."}), 401)
 
 def hash_pin(pin: str, salt: bytes) -> str:
-    """Uses scrypt password-based key derivation to securely hash the PIN."""
-    derived = hashlib.scrypt(
-        pin.encode('utf-8'),
-        salt=salt,
-        n=16384,
-        r=8,
-        p=1,
-        dklen=32
-    )
+    derived = hashlib.scrypt(pin.encode('utf-8'), salt=salt, n=16384, r=8, p=1, dklen=32)
     return base64.b64encode(derived).decode('utf-8')
 
 def verify_pin(pin: str, stored_hash_b64: str, salt_b64: str) -> bool:
-    """Safely verifies a provided PIN against the stored scrypt hash in constant-time."""
     try:
         salt = base64.b64decode(salt_b64)
         expected_hash = base64.b64decode(stored_hash_b64)
-        derived = hashlib.scrypt(
-            pin.encode('utf-8'),
-            salt=salt,
-            n=16384,
-            r=8,
-            p=1,
-            dklen=32
-        )
+        derived = hashlib.scrypt(pin.encode('utf-8'), salt=salt, n=16384, r=8, p=1, dklen=32)
         return hmac.compare_digest(derived, expected_hash)
     except Exception:
         return False
 
-@app.before_request
-def handle_preflight():
-    """Handles CORS preflight requests securely for the SPA."""
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
-@app.after_request
-def add_cors_headers(response):
-    """Secures CORS explicitly to the required frontend."""
-    response.headers['Access-Control-Allow-Origin'] = 'https://komni.vercel.app'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
+# --- ROUTES (Aliased for all possible Vercel routing prefixes) ---
 
 @app.route("/api/security/auth/pin_guard/status", methods=["GET"])
 @app.route("/status", methods=["GET"])
+@app.route("/pin_guard/status", methods=["GET"])
 def get_status():
     decoded_token, err_resp = require_firebase_user(request)
     if err_resp: return err_resp
@@ -124,6 +110,7 @@ def get_status():
 
 @app.route("/api/security/auth/pin_guard/provision", methods=["POST"])
 @app.route("/provision", methods=["POST"])
+@app.route("/pin_guard/provision", methods=["POST"])
 def provision_pin():
     decoded_token, err_resp = require_firebase_user(request)
     if err_resp: return err_resp
@@ -143,11 +130,9 @@ def provision_pin():
             data = snapshot.to_dict() or {}
             pin_guard = data.get("security", {}).get("pinGuard", {})
             
-            # Idempotent / concurrent check: fail if hash already exists
             if pin_guard.get("pinHash"):
                 return False, {"ok": False, "message": "PIN already provisioned."}
                 
-            # Secure 6-digit generation
             pin = f"{secrets.randbelow(1000000):06d}"
             salt = secrets.token_bytes(16)
             salt_b64 = base64.b64encode(salt).decode('utf-8')
@@ -164,7 +149,6 @@ def provision_pin():
                 "version": 1
             }
             
-            # Deep merge protects existing unrelated user metadata
             transaction.set(ref, {"security": {"pinGuard": pin_data}}, merge=True)
             return True, pin
             
@@ -173,17 +157,14 @@ def provision_pin():
             return jsonify(result), 409
             
         print("PIN_PROVISIONED")
-        return jsonify({
-            "ok": True,
-            "provisioned": True,
-            "pin": result
-        }), 201
+        return jsonify({"ok": True, "provisioned": True, "pin": result}), 201
     except Exception as e:
         print(f"Error in provision: {e}")
         return jsonify({"ok": False, "message": "Internal server error."}), 500
 
 @app.route("/api/security/auth/pin_guard/confirm", methods=["POST"])
 @app.route("/confirm", methods=["POST"])
+@app.route("/pin_guard/confirm", methods=["POST"])
 def confirm_pin():
     decoded_token, err_resp = require_firebase_user(request)
     if err_resp: return err_resp
@@ -201,7 +182,6 @@ def confirm_pin():
             return jsonify({"ok": False, "message": "No PIN has been provisioned."}), 409
             
         pin_guard = doc.to_dict().get("security", {}).get("pinGuard", {})
-        
         if not pin_guard.get("pinHash"):
             return jsonify({"ok": False, "message": "No PIN has been provisioned."}), 409
             
@@ -225,6 +205,7 @@ def confirm_pin():
 
 @app.route("/api/security/auth/pin_guard/verify", methods=["POST"])
 @app.route("/verify", methods=["POST"])
+@app.route("/pin_guard/verify", methods=["POST"])
 def verify_pin_route():
     decoded_token, err_resp = require_firebase_user(request)
     if err_resp: return err_resp
@@ -248,14 +229,12 @@ def verify_pin_route():
             return jsonify({"ok": False, "verified": False, "message": "PIN is not configured."}), 403
             
         pin_guard = doc.to_dict().get("security", {}).get("pinGuard", {})
-        
         if not pin_guard.get("confirmed"):
             return jsonify({"ok": False, "verified": False, "message": "PIN is not configured."}), 403
             
         now = datetime.now(timezone.utc)
         locked_until = pin_guard.get("lockedUntil")
         
-        # Check brute force state
         if locked_until and isinstance(locked_until, datetime):
             if now < locked_until:
                 return jsonify({"ok": False, "verified": False, "message": "PIN verification temporarily locked. Try again later."}), 429
@@ -278,7 +257,6 @@ def verify_pin_route():
             print("PIN_VERIFY_FAILURE")
             return jsonify({"ok": False, "verified": False, "message": "Incorrect PIN."}), 401
             
-        # Success - Reset brute force data
         user_ref.update({
             "security.pinGuard.lastVerifiedAt": firestore.SERVER_TIMESTAMP,
             "security.pinGuard.failedAttempts": 0,
