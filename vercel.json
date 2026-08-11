@@ -1,13 +1,7 @@
 {
-  "builds": [
-    {
-      "src": "api/security/auth/pin_guard.py",
-      "use": "@vercel/python"
-    }
-  ],
   "rewrites": [
     {
-      "source": "/api/security/auth/pin_guard/:match*",
+      "source": "/api/security/auth/pin_guard/:path*",
       "destination": "/api/security/auth/pin_guard.py"
     }
   ]
