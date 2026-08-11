@@ -1,8 +1,3 @@
 {
-  "rewrites": [
-    {
-      "source": "/api/security/auth/pin_guard/:path*",
-      "destination": "/api/security/auth/pin_guard.py"
-    }
-  ]
+  "rewrites": []
 }
