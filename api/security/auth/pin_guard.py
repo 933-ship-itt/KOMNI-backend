@@ -1,4 +1,5 @@
 import os
+import json
 import secrets
 import bcrypt
 from fastapi import FastAPI, Depends, HTTPException, Header
@@ -18,24 +19,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Firebase Admin
-# Vercel environments require strict handling of private keys due to newline characters
+# Initialize Firebase Admin using a single JSON environment variable
 if not firebase_admin._apps:
-    project_id = os.getenv("FIREBASE_PROJECT_ID", "komni-eb72e")
-    private_key = os.getenv("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n")
-    client_email = os.getenv("FIREBASE_CLIENT_EMAIL", "")
-
-    if private_key and client_email:
-        cred = credentials.Certificate({
-            "type": "service_account",
-            "project_id": project_id,
-            "private_key": private_key,
-            "client_email": client_email,
-            "token_uri": "https://oauth2.googleapis.com/token",
-        })
-        firebase_admin.initialize_app(cred)
+    service_account_json_str = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY")
+    
+    if service_account_json_str:
+        try:
+            # Parse the JSON string from Vercel environment variables
+            service_account_info = json.loads(service_account_json_str)
+            cred = credentials.Certificate(service_account_info)
+            firebase_admin.initialize_app(cred)
+        except json.JSONDecodeError:
+            print("CRITICAL: Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY as valid JSON.")
+            firebase_admin.initialize_app() # Fallback
     else:
-        # Fallback for local environments or default service accounts
+        # Fallback for local development if the environment variable is missing
         firebase_admin.initialize_app()
 
 db = firestore.client()
